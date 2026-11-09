@@ -33,18 +33,24 @@ never modified — because that macro requires an Xcode-only plugin.
 ## How it works
 
 - `PageCapturer` loads the URL in an off-screen `WKWebView`, waits for
-  navigation to finish, and reads the rendered DOM via
-  `document.documentElement.outerHTML`.
-- `MHTMLBuilder` wraps that HTML as the root part of an RFC 2557
-  `multipart/related` document with a `text/html` part encoded as
-  quoted-printable.
+  navigation to finish, reads the rendered DOM via
+  `document.documentElement.outerHTML`, and runs a second script to collect the
+  absolute URLs of referenced subresources (images via `currentSrc`, `<picture>`
+  sources, stylesheets, preloads, and CSS `url()` targets such as
+  background-images and `@font-face` fonts).
+- `ResourceCollector` fetches those URLs over `URLSession` with bounded
+  concurrency and a per-resource timeout. Failed or slow resources are skipped
+  (they stay as external references); `data:` URIs are left inline.
+- `MHTMLBuilder` writes an RFC 2557 `multipart/related` document: the rendered
+  DOM as a quoted-printable `text/html` root part, followed by one base64 part
+  per fetched resource, each linked by its original absolute URL via
+  `Content-Location`.
 
-This is the **simple HTML snapshot** strategy: the fully rendered DOM is
-captured (so JavaScript-generated content is included), but external
-subresources (images, stylesheets, fonts) are embedded only when they are
-already inline in the page (e.g. `data:` URIs). External URLs are preserved
-as references. The resulting `.mhtml` opens in Chrome, Edge, and other
-browsers that support MHTML.
+This produces a self-contained, Chrome/Edge-style `.mhtml` that renders offline:
+images, stylesheets, and fonts are embedded as separate MIME parts. The HTML's
+`src`/`url()` attributes are left unchanged — the MIME `Content-Location` is
+what links them to the embedded parts. The save status reports how many
+resources were embedded (and how many, if any, were skipped).
 
 ## Requirements
 
@@ -58,8 +64,9 @@ browsers that support MHTML.
 MHTMLSaver/
   MHTMLSaverApp.swift   App entry point
   ContentView.swift     URL input, validation, save flow (NSSavePanel)
-  PageCapturer.swift     WKWebView loader + DOM extraction
-  MHTMLBuilder.swift     RFC 2557 MHTML assembly + quoted-printable encoder
+  PageCapturer.swift     WKWebView loader + DOM/resource-URL extraction
+  ResourceCollector.swift  Concurrent URLSession fetch of subresources
+  MHTMLBuilder.swift     RFC 2557 MHTML assembly (QP html + base64 parts)
   Info.plist
   MHTMLSaver.entitlements  App Sandbox: network client + user-selected files
 ```

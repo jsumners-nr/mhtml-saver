@@ -1,24 +1,25 @@
 import Foundation
 
-/// Builds a minimal RFC 2557 `multipart/related` MHTML document from a
-/// single rendered HTML snapshot.
+/// Builds an RFC 2557 `multipart/related` MHTML document: the rendered DOM HTML
+/// as the root part, followed by one base64 part per embedded subresource.
 ///
-/// This is the "Simple HTML snapshot" strategy: the rendered DOM HTML is
-/// captured and wrapped as the root part of an MHTML container. Subresources
-/// (images, CSS, fonts) are only embedded when they are already inline in the
-/// captured HTML (e.g. data: URIs). External references are preserved as-is.
+/// Subresources are linked to the HTML by their original absolute URL via each
+/// part's `Content-Location` header (the HTML's `src`/`url()` attributes are
+/// left unchanged). Resources not passed in remain external references.
 enum MHTMLBuilder {
     /// Produces the MHTML document bytes.
     ///
     /// - Parameters:
     ///   - html: The rendered DOM HTML of the page.
-    ///   - url: The source URL, written to the `Content-Location` and `Snapshot-Content-Location`.
+    ///   - url: The source URL, written to the HTML part's `Content-Location`.
     ///   - title: Optional page title, written to the `Subject` header.
+    ///   - resources: Fetched subresources to embed as additional MIME parts.
     ///   - date: Timestamp written to the `Date` header.
     static func build(
         html: String,
         url: URL,
         title: String?,
+        resources: [ResourceCollector.Resource] = [],
         date: Date = Date()
     ) -> Data {
         let boundary = "----=_MHTMLSaver_\(UUID().uuidString)"
@@ -36,23 +37,45 @@ enum MHTMLBuilder {
         header += "\tboundary=\"\(boundary)\"\(crlf)"
         header += crlf
 
-        var part = ""
-        part += "--\(boundary)\(crlf)"
-        part += "Content-Type: text/html; charset=\"utf-8\"\(crlf)"
-        part += "Content-Transfer-Encoding: quoted-printable\(crlf)"
-        part += "Content-Location: \(url.absoluteString)\(crlf)"
-        part += crlf
-        part += QuotedPrintable.encode(html)
-        part += crlf
-
-        var closing = ""
-        closing += "--\(boundary)--\(crlf)"
-
         var data = Data()
         data.append(header.data(using: .utf8) ?? Data())
-        data.append(part.data(using: .utf8) ?? Data())
+
+        // Root HTML part (quoted-printable).
+        var htmlPart = ""
+        htmlPart += "--\(boundary)\(crlf)"
+        htmlPart += "Content-Type: text/html; charset=\"utf-8\"\(crlf)"
+        htmlPart += "Content-Transfer-Encoding: quoted-printable\(crlf)"
+        htmlPart += "Content-Location: \(url.absoluteString)\(crlf)"
+        htmlPart += crlf
+        htmlPart += QuotedPrintable.encode(html)
+        htmlPart += crlf
+        data.append(htmlPart.data(using: .utf8) ?? Data())
+
+        // One base64 part per embedded resource.
+        for resource in resources {
+            var partHeader = ""
+            partHeader += "--\(boundary)\(crlf)"
+            partHeader += "Content-Type: \(resource.mimeType)\(crlf)"
+            partHeader += "Content-Transfer-Encoding: base64\(crlf)"
+            partHeader += "Content-Location: \(resource.url.absoluteString)\(crlf)"
+            partHeader += crlf
+            data.append(partHeader.data(using: .utf8) ?? Data())
+            data.append((base64Wrapped(resource.data) + crlf).data(using: .utf8) ?? Data())
+        }
+
+        let closing = "--\(boundary)--\(crlf)"
         data.append(closing.data(using: .utf8) ?? Data())
         return data
+    }
+
+    /// Base64-encodes `data` wrapped to 76-character lines with CRLF endings,
+    /// as expected for a MIME `base64` transfer encoding.
+    private static func base64Wrapped(_ data: Data) -> String {
+        data.base64EncodedString(options: [
+            .lineLength76Characters,
+            .endLineWithCarriageReturn,
+            .endLineWithLineFeed,
+        ])
     }
 
     /// RFC 822 date, e.g. `Mon, 09 Nov 2026 13:15:00 +0000`.

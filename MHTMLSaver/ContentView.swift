@@ -5,10 +5,16 @@ struct ContentView: View {
     @State private var urlString = ""
     @State private var status: Status = .idle
 
+    private struct SaveResult: Equatable {
+        let path: String
+        let embedded: Int
+        let attempted: Int
+    }
+
     private enum Status: Equatable {
         case idle
         case working
-        case success(String)
+        case success(SaveResult)
         case failure(String)
     }
 
@@ -57,15 +63,31 @@ struct ContentView: View {
         case .working:
             Label("Loading and saving…", systemImage: "arrow.down.circle")
                 .foregroundStyle(.secondary)
-        case .success(let path):
-            Label("Saved to \(path)", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .textSelection(.enabled)
+        case .success(let result):
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Saved to \(result.path)", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .textSelection(.enabled)
+                Text(resourceSummary(for: result))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         case .failure(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
         }
+    }
+
+    private func resourceSummary(for result: SaveResult) -> String {
+        if result.attempted == 0 {
+            return "No external resources to embed."
+        }
+        if result.embedded == result.attempted {
+            return "Embedded \(result.embedded) resource\(result.embedded == 1 ? "" : "s")."
+        }
+        let skipped = result.attempted - result.embedded
+        return "Embedded \(result.embedded) of \(result.attempted) resources (\(skipped) skipped)."
     }
 
     /// Normalizes the input into a URL, defaulting to https:// when no scheme
@@ -98,10 +120,12 @@ struct ContentView: View {
             do {
                 let capturer = PageCapturer()
                 let capture = try await capturer.capture(url: url)
+                let collected = await ResourceCollector.collect(urls: capture.resourceURLs)
                 let data = MHTMLBuilder.build(
                     html: capture.html,
                     url: capture.finalURL,
-                    title: capture.title
+                    title: capture.title,
+                    resources: collected.resources
                 )
 
                 guard let destination = await presentSavePanel(
@@ -112,7 +136,11 @@ struct ContentView: View {
                 }
 
                 try data.write(to: destination)
-                status = .success(destination.path)
+                status = .success(SaveResult(
+                    path: destination.path,
+                    embedded: collected.resources.count,
+                    attempted: collected.attempted
+                ))
             } catch {
                 status = .failure(error.localizedDescription)
             }
